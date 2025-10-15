@@ -226,14 +226,14 @@ class InvoiceSplitter:
             s3_pdf_key: S3 key of the uploaded PDF
             s3_json_key: S3 key of the uploaded JSON
         """
+        # Prepare payload with all invoice data plus additional fields
+        payload = {
+            **invoice_data,
+            "attachment_id": attachment_id,
+            "s3_pdf_key": s3_pdf_key,
+            "s3_json_key": s3_json_key
+        }
         try:
-            # Prepare payload with all invoice data plus additional fields
-            payload = {
-                **invoice_data,
-                "attachment_id": attachment_id,
-                "s3_pdf_key": s3_pdf_key,
-                "s3_json_key": s3_json_key
-            }
             
             response = requests.post(f"{self.api_url}/api/v1/processor/invoices", json=payload, timeout=30)
             response.raise_for_status()
