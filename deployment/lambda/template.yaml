@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Invoice Extraction Lambda Function
+
+Parameters:
+  SQSQueueUrl:
+    Type: String
+    Description: SQS Queue URL for invoice processing
+    Default: ""
+  
+  OpenAIApiKey:
+    Type: String
+    Description: OpenAI API Key
+    NoEcho: true
+    Default: ""
+  
+  ApiUrl:
+    Type: String
+    Description: Base URL for attachment API
+    Default: ""
+  
+  S3BucketName:
+    Type: String
+    Description: S3 bucket name for uploads
+    Default: ""
+
+Globals:
+  Function:
+    Timeout: 900
+    MemorySize: 2048
+    Environment:
+      Variables:
+        OPENAI_API_KEY: !Ref OpenAIApiKey
+        API_URL: !Ref ApiUrl
+        S3_BUCKET_NAME: !Ref S3BucketName
+        DEBUG_LOG: "false"
+
+Resources:
+  InvoiceExtractionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageConfig:
+        Command: ["invoice_extraction.handlers.lambda_handler.handler"]
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt InvoiceQueue.Arn
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 5
+      ReservedConcurrencyLimit: 10
+      Policies:
+        - SQSReceiveMessagePolicy:
+            QueueName: !Ref InvoiceQueue
+        - SQSSendMessagePolicy:
+            QueueName: !Ref DeadLetterQueue
+        - S3WritePolicy:
+            BucketName: !Ref S3BucketName
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  InvoiceQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: invoice-extraction-queue
+      VisibilityTimeoutSeconds: 960  # 16 minutes (function timeout + buffer)
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Enable long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: invoice-extraction-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+
+Outputs:
+  InvoiceExtractionFunction:
+    Description: "Invoice Extraction Lambda Function ARN"
+    Value: !GetAtt InvoiceExtractionFunction.Arn
+  
+  InvoiceQueueUrl:
+    Description: "SQS Queue URL for invoice processing"
+    Value: !Ref InvoiceQueue
+  
+  DeadLetterQueueUrl:
+    Description: "Dead Letter Queue URL"
+    Value: !Ref DeadLetterQueue

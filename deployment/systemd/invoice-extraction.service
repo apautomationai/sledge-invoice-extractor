@@ -1,0 +1,17 @@
+[Unit]
+Description=Invoice Extraction SQS Worker
+After=network.target
+
+[Service]
+Type=simple
+User=invoice-processor
+WorkingDirectory=/opt/payables/services/invoice-extraction
+EnvironmentFile=/etc/invoice-extraction/.env
+ExecStart=/usr/bin/python3 -m invoice_extraction.handlers.server_handler
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

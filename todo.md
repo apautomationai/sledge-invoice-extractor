@@ -1,0 +1,7 @@
+- after processing upload the files to s3 and update the database status and other data to show on the frontend
+- implement queue for asyncronous processing
+- implement support for gemini
+- implement langchain
+- optimize the process
+- optimize cost
+- bulk processing for faster response
