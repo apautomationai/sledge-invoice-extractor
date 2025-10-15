@@ -156,6 +156,25 @@ class InvoiceSplitter:
         except requests.exceptions.RequestException as e:
             raise Exception(f"Failed to fetch attachment metadata: {str(e)}")
     
+    def update_attachment_status(self, attachment_id: int, status: str):
+        """
+        Update attachment status via API.
+        
+        Args:
+            attachment_id: ID of the attachment
+            status: Status value ("processing", "success", or "failed")
+        """
+        try:
+            url = f"{self.api_url}/api/v1/processor/attachments/{attachment_id}"
+            payload = {"status": status}
+            response = requests.patch(url, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            self._log(f"Updated attachment {attachment_id} status to: {status}")
+        except requests.exceptions.RequestException as e:
+            # Log warning but don't raise - status update failure shouldn't stop processing
+            self._log(f"Warning: Failed to update attachment status: {str(e)}", "warning")
+    
     def download_pdf_from_url(self, file_url: str, output_path: str):
         """
         Download PDF from URL to local file.
@@ -176,20 +195,20 @@ class InvoiceSplitter:
         except requests.exceptions.RequestException as e:
             raise Exception(f"Failed to download PDF: {str(e)}")
     
-    def upload_to_s3(self, file_path: str, s3_key: str) -> str:
+    def upload_to_s3(self, file_path: str, s3_key: str, mime_type: str='binary/octet-stream') -> str:
         """
         Upload file to S3.
         
         Args:
             file_path: Local path to file
             s3_key: S3 key for the uploaded file
-            
+            mime_type: MIME type of the uploaded file
         Returns:
             S3 key of the uploaded file
         """
         try:
             with open(file_path, 'rb') as f:
-                self.s3_client.upload_fileobj(f, self.s3_bucket_name, s3_key)
+                self.s3_client.upload_fileobj(f, self.s3_bucket_name, s3_key, ExtraArgs={'ContentType': mime_type})
             
             self._log(f"    Uploaded to S3: {s3_key}")
             return s3_key
@@ -613,206 +632,221 @@ Respond ONLY with valid JSON in this exact format:
         self._log(f"Processing: {pdf_path.name}")
         self._log(f"Output directory: {output_dir}")
         
-        # Check for corruption
-        is_valid, error = self.check_pdf_corruption(str(pdf_path))
+        # Update status to processing
+        self.update_attachment_status(attachment_id, "processing")
         
-        if not is_valid:
-            self._log(f"⚠️  PDF appears corrupted: {error}", "warning")
-            self._log("Attempting to repair...")
+        try:
+            # Check for corruption
+            is_valid, error = self.check_pdf_corruption(str(pdf_path))
             
-            success, result = self.repair_pdf(str(pdf_path))
+            if not is_valid:
+                self._log(f"⚠️  PDF appears corrupted: {error}", "warning")
+                self._log("Attempting to repair...")
+                
+                success, result = self.repair_pdf(str(pdf_path))
+                
+                if success:
+                    self._log(f"✓ PDF repaired successfully: {result}")
+                    pdf_path = Path(result)
+                else:
+                    self._log(f"✗ Repair failed: {result}", "error")
+                    error_file = errors_dir / pdf_path.name
+                    shutil.copy2(pdf_path, error_file)
+                    self._log(f"Copied to errors folder: {error_file}")
+                    self.update_attachment_status(attachment_id, "failed")
+                    return []
             
-            if success:
-                self._log(f"✓ PDF repaired successfully: {result}")
-                pdf_path = Path(result)
-            else:
-                self._log(f"✗ Repair failed: {result}", "error")
+            # Convert PDF to images
+            self._log("Converting PDF pages to images...")
+            try:
+                images = convert_from_path(str(pdf_path), dpi=200)
+            except Exception as e:
+                self._log(f"Error converting PDF to images: {e}", "error")
                 error_file = errors_dir / pdf_path.name
                 shutil.copy2(pdf_path, error_file)
                 self._log(f"Copied to errors folder: {error_file}")
+                self.update_attachment_status(attachment_id, "failed")
                 return []
-        
-        # Convert PDF to images
-        self._log("Converting PDF pages to images...")
-        try:
-            images = convert_from_path(str(pdf_path), dpi=200)
-        except Exception as e:
-            self._log(f"Error converting PDF to images: {e}", "error")
-            error_file = errors_dir / pdf_path.name
-            shutil.copy2(pdf_path, error_file)
-            self._log(f"Copied to errors folder: {error_file}")
-            return []
-        
-        total_pages = len(images)
-        self._log(f"Total pages: {total_pages}")
-        
-        # Analyze each page with Vision API
-        self._log("\nAnalyzing pages with GPT-4 Vision...")
-        analyses = []
-        for i, image in enumerate(images):
-            self._log(f"  Analyzing page {i + 1}/{total_pages}...")
-            analysis = self.analyze_page_with_vision(image, i + 1, total_pages)
-            analyses.append(analysis)
             
-            # Print analysis summary
-            status = "NEW INVOICE" if analysis.get("is_invoice_start") else "CONTINUATION"
-            inv_num = analysis.get("invoice_number") or "N/A"
-            self._log(f"{status} | Invoice#: {inv_num} | Confidence: {analysis.get('confidence', 0):.2f}")
-        
-        # Group pages into invoices
-        self._log("\nGrouping pages into invoices...")
-        invoice_groups = self.group_pages_into_invoices(analyses)
-        self._log(f"Found {len(invoice_groups)} invoice(s)")
-        
-        # Extract and save each invoice with JSON data
-        output_files = []
-        base_name = pdf_path.stem
-        
-        # Track invoices created in THIS session only (for merging within same PDF)
-        session_invoices = {}  # invoice_number -> (pdf_path, json_path)
-        
-        for idx, page_group in enumerate(invoice_groups, start=1):
-            # Try to get invoice number from the first page of the group
-            invoice_num = analyses[page_group[0]].get("invoice_number")
+            total_pages = len(images)
+            self._log(f"Total pages: {total_pages}")
             
-            if invoice_num:
-                # Sanitize invoice number for filename
-                safe_invoice_num = "".join(c for c in invoice_num if c.isalnum() or c in "-_")
-                output_filename = f"{base_name}_invoice_{safe_invoice_num}.pdf"
-            else:
-                output_filename = f"{base_name}_invoice_{idx}.pdf"
-            
-            output_path = output_dir / output_filename
-            json_output_path = output_dir / output_filename.replace(".pdf", ".json")
-            
-            self._log(f"\n  Invoice {idx}: Pages {[p+1 for p in page_group]} -> {output_filename}")
-            
-            # Extract invoice data from the images for this invoice first
-            self._log(f"    Extracting invoice data...")
-            invoice_images = [images[i] for i in page_group]
-            invoice_data = self.extract_invoice_data(invoice_images)
-            
-            # Add attachment_id to invoice data
-            invoice_data["attachment_id"] = attachment_id
-            
-            # Check if this invoice number already exists IN THIS SESSION
-            extracted_invoice_num = invoice_data.get("invoice_number")
-            existing_files = None
-            
-            if extracted_invoice_num and extracted_invoice_num in session_invoices:
-                existing_files = session_invoices[extracted_invoice_num]
-            
-            if existing_files:
-                # Merge with existing invoice
-                existing_json_path, existing_pdf_path = existing_files
-                self._log(f"    Found existing invoice with same number: {existing_json_path.name}")
+            # Analyze each page with Vision API
+            self._log("\nAnalyzing pages with GPT-4 Vision...")
+            analyses = []
+            for i, image in enumerate(images):
+                self._log(f"  Analyzing page {i + 1}/{total_pages}...")
+                analysis = self.analyze_page_with_vision(image, i + 1, total_pages)
+                analyses.append(analysis)
                 
-                try:
-                    # Read existing JSON data
-                    with open(existing_json_path, 'r', encoding='utf-8') as f:
-                        existing_data = json.load(f)
+                # Print analysis summary
+                status = "NEW INVOICE" if analysis.get("is_invoice_start") else "CONTINUATION"
+                inv_num = analysis.get("invoice_number") or "N/A"
+                self._log(f"{status} | Invoice#: {inv_num} | Confidence: {analysis.get('confidence', 0):.2f}")
+            
+            # Group pages into invoices
+            self._log("\nGrouping pages into invoices...")
+            invoice_groups = self.group_pages_into_invoices(analyses)
+            self._log(f"Found {len(invoice_groups)} invoice(s)")
+            
+            # Extract and save each invoice with JSON data
+            output_files = []
+            base_name = pdf_path.stem
+            
+            # Track invoices created in THIS session only (for merging within same PDF)
+            session_invoices = {}  # invoice_number -> (pdf_path, json_path)
+            
+            for idx, page_group in enumerate(invoice_groups, start=1):
+                # Try to get invoice number from the first page of the group
+                invoice_num = analyses[page_group[0]].get("invoice_number")
+                
+                if invoice_num:
+                    # Sanitize invoice number for filename
+                    safe_invoice_num = "".join(c for c in invoice_num if c.isalnum() or c in "-_")
+                    output_filename = f"{base_name}_invoice_{safe_invoice_num}.pdf"
+                else:
+                    output_filename = f"{base_name}_invoice_{idx}.pdf"
+                
+                output_path = output_dir / output_filename
+                json_output_path = output_dir / output_filename.replace(".pdf", ".json")
+                
+                self._log(f"\n  Invoice {idx}: Pages {[p+1 for p in page_group]} -> {output_filename}")
+                
+                # Extract invoice data from the images for this invoice first
+                self._log(f"    Extracting invoice data...")
+                invoice_images = [images[i] for i in page_group]
+                invoice_data = self.extract_invoice_data(invoice_images)
+                
+                # Add attachment_id to invoice data
+                invoice_data["attachment_id"] = attachment_id
+                
+                # Check if this invoice number already exists IN THIS SESSION
+                extracted_invoice_num = invoice_data.get("invoice_number")
+                existing_files = None
+                
+                if extracted_invoice_num and extracted_invoice_num in session_invoices:
+                    existing_files = session_invoices[extracted_invoice_num]
+                
+                if existing_files:
+                    # Merge with existing invoice
+                    existing_json_path, existing_pdf_path = existing_files
+                    self._log(f"    Found existing invoice with same number: {existing_json_path.name}")
                     
-                    # Merge the data
-                    merged_data = self.merge_invoice_data(existing_data, invoice_data)
-                    
-                    # Merge PDF files
-                    self._log(f"    Merging pages into existing PDF...")
-                    self.merge_pdf_files(str(existing_pdf_path), str(pdf_path), page_group)
-                    
-                    # Save merged JSON data
-                    with open(existing_json_path, 'w', encoding='utf-8') as json_file:
-                        json.dump(merged_data, json_file, indent=2, ensure_ascii=False)
-                    
-                    self._log(f"    Updated JSON: {existing_json_path.name}")
-                    self._log(f"    Merged invoice data (total line items: {len(merged_data.get('line_items', []))})")
-                    
-                    # Upload updated files to S3
                     try:
-                        pdf_s3_key = f"invoices/{attachment_id}/{existing_pdf_path.name}"
-                        json_s3_key = f"invoices/{attachment_id}/{existing_json_path.name}"
+                        # Read existing JSON data
+                        with open(existing_json_path, 'r', encoding='utf-8') as f:
+                            existing_data = json.load(f)
                         
-                        self.upload_to_s3(str(existing_pdf_path), pdf_s3_key)
-                        self.upload_to_s3(str(existing_json_path), json_s3_key)
+                        # Merge the data
+                        merged_data = self.merge_invoice_data(existing_data, invoice_data)
+                        
+                        # Merge PDF files
+                        self._log(f"    Merging pages into existing PDF...")
+                        self.merge_pdf_files(str(existing_pdf_path), str(pdf_path), page_group)
+                        
+                        # Save merged JSON data
+                        with open(existing_json_path, 'w', encoding='utf-8') as json_file:
+                            json.dump(merged_data, json_file, indent=2, ensure_ascii=False)
+                        
+                        self._log(f"    Updated JSON: {existing_json_path.name}")
+                        self._log(f"    Merged invoice data (total line items: {len(merged_data.get('line_items', []))})")
+                        
+                        # Upload updated files to S3
+                        try:
+                            pdf_s3_key = f"invoices/{attachment_id}/{existing_pdf_path.name}"
+                            json_s3_key = f"invoices/{attachment_id}/{existing_json_path.name}"
+                            
+                            self.upload_to_s3(str(existing_pdf_path), pdf_s3_key, mime_type="application/pdf")
+                            self.upload_to_s3(str(existing_json_path), json_s3_key, mime_type="application/json")
 
-                        tmp = {
-                            "merged_data": merged_data,
-                            "attachment_id": attachment_id,
-                            "pdf_s3_key": pdf_s3_key,
-                            "json_s3_key": json_s3_key,
-                        }
-                        self._log(f"{tmp}", "debug")
+                            tmp = {
+                                "merged_data": merged_data,
+                                "attachment_id": attachment_id,
+                                "pdf_s3_key": pdf_s3_key,
+                                "json_s3_key": json_s3_key,
+                            }
+                            self._log(f"{tmp}", "debug")
+                            
+                            # Create/update invoice record in database
+                            self.create_invoice_record(merged_data, attachment_id, pdf_s3_key, json_s3_key)
+                        except Exception as e:
+                            self._log(f"    Warning: S3 upload or API call failed: {e}", "warning")
                         
-                        # Create/update invoice record in database
-                        self.create_invoice_record(merged_data, attachment_id, pdf_s3_key, json_s3_key)
+                        # Add existing file to output (if not already there)
+                        if str(existing_pdf_path) not in output_files:
+                            output_files.append(str(existing_pdf_path))
+                        
                     except Exception as e:
-                        self._log(f"    Warning: S3 upload or API call failed: {e}", "warning")
-                    
-                    # Add existing file to output (if not already there)
-                    if str(existing_pdf_path) not in output_files:
-                        output_files.append(str(existing_pdf_path))
-                    
-                except Exception as e:
-                    self._log(f"    Error merging invoice: {e}", "error")
-                    self._log(f"    Creating separate file instead...")
-                    # Fall back to creating new files
+                        self._log(f"    Error merging invoice: {e}", "error")
+                        self._log(f"    Creating separate file instead...")
+                        # Fall back to creating new files
+                        self.extract_pages_to_pdf(str(pdf_path), page_group, str(output_path))
+                        output_files.append(str(output_path))
+                        with open(json_output_path, 'w', encoding='utf-8') as json_file:
+                            json.dump(invoice_data, json_file, indent=2, ensure_ascii=False)
+                        self._log(f"    Saved JSON: {json_output_path.name}")
+                        
+                        # Upload to S3 and create invoice record for fallback case
+                        try:
+                            pdf_s3_key = f"invoices/{attachment_id}/{output_filename}"
+                            json_s3_key = f"invoices/{attachment_id}/{json_output_path.name}"
+                            
+                            self.upload_to_s3(str(output_path), pdf_s3_key, mime_type="application/pdf")
+                            self.upload_to_s3(str(json_output_path), json_s3_key, mime_type="application/json")
+                            
+                            # Create invoice record in database
+                            self.create_invoice_record(invoice_data, attachment_id, pdf_s3_key, json_s3_key)
+                        except Exception as upload_error:
+                            self._log(f"    Warning: S3 upload or API call failed: {upload_error}", "warning")
+                else:
+                    # Create new invoice files
                     self.extract_pages_to_pdf(str(pdf_path), page_group, str(output_path))
                     output_files.append(str(output_path))
+                    
+                    # Save JSON data
                     with open(json_output_path, 'w', encoding='utf-8') as json_file:
                         json.dump(invoice_data, json_file, indent=2, ensure_ascii=False)
+                    
+                    self._log(f"    Saved PDF: {output_filename}")
                     self._log(f"    Saved JSON: {json_output_path.name}")
                     
-                    # Upload to S3 and create invoice record for fallback case
+                    # Upload to S3 and create invoice record
                     try:
                         pdf_s3_key = f"invoices/{attachment_id}/{output_filename}"
                         json_s3_key = f"invoices/{attachment_id}/{json_output_path.name}"
                         
-                        self.upload_to_s3(str(output_path), pdf_s3_key)
-                        self.upload_to_s3(str(json_output_path), json_s3_key)
+                        self.upload_to_s3(str(output_path), pdf_s3_key, mime_type="application/pdf")
+                        self.upload_to_s3(str(json_output_path), json_s3_key, mime_type="application/json")
                         
                         # Create invoice record in database
                         self.create_invoice_record(invoice_data, attachment_id, pdf_s3_key, json_s3_key)
-                    except Exception as upload_error:
-                        self._log(f"    Warning: S3 upload or API call failed: {upload_error}", "warning")
-            else:
-                # Create new invoice files
-                self.extract_pages_to_pdf(str(pdf_path), page_group, str(output_path))
-                output_files.append(str(output_path))
-                
-                # Save JSON data
-                with open(json_output_path, 'w', encoding='utf-8') as json_file:
-                    json.dump(invoice_data, json_file, indent=2, ensure_ascii=False)
-                
-                self._log(f"    Saved PDF: {output_filename}")
-                self._log(f"    Saved JSON: {json_output_path.name}")
-                
-                # Upload to S3 and create invoice record
-                try:
-                    pdf_s3_key = f"invoices/{attachment_id}/{output_filename}"
-                    json_s3_key = f"invoices/{attachment_id}/{json_output_path.name}"
+                    except Exception as e:
+                        self._log(f"    Warning: S3 upload or API call failed: {e}", "warning")
                     
-                    self.upload_to_s3(str(output_path), pdf_s3_key)
-                    self.upload_to_s3(str(json_output_path), json_s3_key)
-                    
-                    # Create invoice record in database
-                    self.create_invoice_record(invoice_data, attachment_id, pdf_s3_key, json_s3_key)
-                except Exception as e:
-                    self._log(f"    Warning: S3 upload or API call failed: {e}", "warning")
+                    # Register this invoice in the session for potential future merges
+                    if extracted_invoice_num:
+                        session_invoices[extracted_invoice_num] = (json_output_path, output_path)
                 
-                # Register this invoice in the session for potential future merges
-                if extracted_invoice_num:
-                    session_invoices[extracted_invoice_num] = (json_output_path, output_path)
+                # Display extracted info summary
+                if invoice_data.get("invoice_number"):
+                    self._log(f"    Invoice #: {invoice_data['invoice_number']}")
+                if invoice_data.get("vendor_name"):
+                    self._log(f"    Vendor: {invoice_data['vendor_name']}")
+                if invoice_data.get("total_amount"):
+                    currency = invoice_data.get("currency", "")
+                    self._log(f"    Total: {currency} {invoice_data['total_amount']}")
+                if invoice_data.get("line_items"):
+                    self._log(f"    Line items: {len(invoice_data['line_items'])}")
             
-            # Display extracted info summary
-            if invoice_data.get("invoice_number"):
-                self._log(f"    Invoice #: {invoice_data['invoice_number']}")
-            if invoice_data.get("vendor_name"):
-                self._log(f"    Vendor: {invoice_data['vendor_name']}")
-            if invoice_data.get("total_amount"):
-                currency = invoice_data.get("currency", "")
-                self._log(f"    Total: {currency} {invoice_data['total_amount']}")
-            if invoice_data.get("line_items"):
-                self._log(f"    Line items: {len(invoice_data['line_items'])}")
-        
-        self._log(f"\n✓ Successfully split into {len(output_files)} invoice(s)")
-        self._log(f"✓ Generated {len(output_files)} JSON data files")
-        return output_files
+            self._log(f"\n✓ Successfully split into {len(output_files)} invoice(s)")
+            self._log(f"✓ Generated {len(output_files)} JSON data files")
+            
+            # Update status to success
+            self.update_attachment_status(attachment_id, "success")
+            
+            return output_files
+            
+        except Exception as e:
+            self._log(f"Unexpected error during processing: {str(e)}", "error")
+            self.update_attachment_status(attachment_id, "failed")
+            raise
