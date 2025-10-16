@@ -16,8 +16,8 @@ from dotenv import load_dotenv
 import boto3
 from botocore.exceptions import ClientError
 
-from ..core.processor import InvoiceSplitter
-from ..utils.logger import setup_logger
+from invoice_extraction.core.processor import InvoiceSplitter
+from invoice_extraction.utils.logger import setup_logger
 
 load_dotenv()
 
