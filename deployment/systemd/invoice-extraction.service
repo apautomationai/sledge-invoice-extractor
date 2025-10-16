@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=invoice-processor
-WorkingDirectory=/opt/payables/services/invoice-extraction
-EnvironmentFile=/etc/invoice-extraction/.env
-ExecStart=/usr/bin/python3 -m invoice_extraction.handlers.server_handler
+WorkingDirectory=/home/ubuntu/sledge-invoice-processor/invoice-extraction
+EnvironmentFile=/home/ubuntu/sledge-invoice-processor/.env
+ExecStart=uv run server_handler.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
