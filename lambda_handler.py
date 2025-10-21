@@ -9,8 +9,8 @@ import tempfile
 import os
 from typing import Dict, List, Any
 
-from ..core.processor import InvoiceSplitter
-from ..utils.logger import setup_logger
+from invoice_extraction.core.processor import InvoiceSplitter
+from invoice_extraction.utils.logger import setup_logger
 
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -24,11 +24,14 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Returns:
         Dict containing processing results and status
     """
+    print("Function started")
     # Set up logger (file logging disabled for Lambda)
     logger = setup_logger("invoice-extraction", enable_file_logging=False)
     
     logger.info(f"Received event with {len(event.get('Records', []))} records")
-    
+
+    print("Event received")
+    print(event)
     processed_attachments = []
     failed_attachments = []
     
@@ -37,7 +40,20 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         for record in event.get('Records', []):
             try:
                 # Parse the message body
-                message_body = json.loads(record['body'])
+                message_body = None
+                if type(record.get('body',{})) == str:
+                    message_body = json.loads(record['body'])
+                else:
+                    message_body = record.get('body',{})
+
+                if not message_body:
+                    logger.error("No message body found in record")
+                    failed_attachments.append({
+                        'message_id': record.get('messageId'),
+                        'error': 'No message body in record'
+                    })
+                    continue
+                
                 attachment_id = message_body.get('attachment_id')
                 
                 if not attachment_id:

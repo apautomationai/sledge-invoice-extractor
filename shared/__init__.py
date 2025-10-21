@@ -1,3 +1,0 @@
-"""
-Shared libraries across microservices.
-"""

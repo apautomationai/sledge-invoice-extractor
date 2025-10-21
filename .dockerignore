@@ -1,0 +1,76 @@
+# Git and version control
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+README2.md
+QUICKSTART.md
+docs/
+*.md
+
+# Development files
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# Output directories
+output/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Test files
+test/
+tests/
+*_test.py
+test_*.py
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Data files (if not needed in Lambda)
+data/
+
+# Deployment files (not needed in Lambda container)
+deployment/
+buildspec.yml
+
+# Lock files (uv will handle dependencies)
+uv.lock
+
+# Other handlers not needed for Lambda
+/docs
+.venv
+todo.md
