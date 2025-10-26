@@ -8,12 +8,12 @@ phases:
     commands:
       - echo "=========================================="
       - echo "Starting DEV Deployment"
-      - echo "Environment: DEV"
-      - echo "Lambda Function: $LAMBDA_FUNCTION_NAME"
-      - echo "AWS Account ID: $AWS_ACCOUNT_ID"
-      - echo "AWS Region: $AWS_DEFAULT_REGION"
-      - echo "ECR Repository: $ECR_REPOSITORY"
-      - echo "Image Tag: $IMAGE_TAG"
+      - echo "Environment:$ENV"
+      - echo "Lambda Function:$LAMBDA_FUNCTION_NAME"
+      - echo "AWS Account ID:$AWS_ACCOUNT_ID"
+      - echo "AWS Region:$AWS_DEFAULT_REGION"
+      - echo "ECR Repository:$ECR_REPOSITORY"
+      - echo "Image Tag:$IMAGE_TAG"
       - echo "=========================================="
       - echo "Retrieving image URI from buildspec artifact..."
       - |
@@ -34,8 +34,8 @@ phases:
   build:
     commands:
       - echo "Deploying to DEV Lambda function..."
-      - echo "Function Name: $LAMBDA_FUNCTION_NAME"
-      - echo "Image URI: $IMAGE_URI"
+      - echo "Function Name:$LAMBDA_FUNCTION_NAME"
+      - echo "Image URI:$IMAGE_URI"
       - echo "Updating Lambda function with new container image..."
       - aws lambda update-function-code --function-name $LAMBDA_FUNCTION_NAME --image-uri $IMAGE_URI
       - echo "Waiting for Lambda function update to complete..."
@@ -44,6 +44,6 @@ phases:
       - aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME --query 'Configuration.CodeSha256' --output text
       - echo "=========================================="
       - echo "DEV Deployment completed successfully!"
-      - echo "Completed at: $(date)"
+      - echo "Completed at:$(date)"
       - echo "=========================================="
 
