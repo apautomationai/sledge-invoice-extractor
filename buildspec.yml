@@ -43,6 +43,6 @@ phases:
 artifacts:
   files:
     - imagedefinitions.json
-    - **/*
+    - '**/*'
   discard-paths: yes
   name: $ECR_REPOSITORY-${COMMIT_HASH}
