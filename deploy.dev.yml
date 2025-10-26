@@ -1,0 +1,49 @@
+version: 0.2
+
+# AWS CodeBuild buildspec for DEV environment deployment
+# This file is used by CodeBuild to deploy the container image to DEV Lambda function
+
+phases:
+  pre_build:
+    commands:
+      - echo "=========================================="
+      - echo "Starting DEV Deployment"
+      - echo "Environment: DEV"
+      - echo "Lambda Function: $LAMBDA_FUNCTION_NAME"
+      - echo "AWS Account ID: $AWS_ACCOUNT_ID"
+      - echo "AWS Region: $AWS_DEFAULT_REGION"
+      - echo "ECR Repository: $ECR_REPOSITORY"
+      - echo "Image Tag: $IMAGE_TAG"
+      - echo "=========================================="
+      - echo "Retrieving image URI from buildspec artifact..."
+      - |
+        if [ -f imagedefinitions.json ]; then
+          IMAGE_URI=$(cat imagedefinitions.json | jq -r '.[0].imageUri')
+          echo "Image URI: $IMAGE_URI"
+          export IMAGE_URI
+        else
+          echo "Error: imagedefinitions.json not found"
+          echo "Building IMAGE_URI from environment variables..."
+          REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY
+          COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+          IMAGE_TAG=${COMMIT_HASH:=latest}
+          export IMAGE_URI=$REPOSITORY_URI:$IMAGE_TAG
+          echo "Image URI: $IMAGE_URI"
+        fi
+
+  build:
+    commands:
+      - echo "Deploying to DEV Lambda function..."
+      - echo "Function Name: $LAMBDA_FUNCTION_NAME"
+      - echo "Image URI: $IMAGE_URI"
+      - echo "Updating Lambda function with new container image..."
+      - aws lambda update-function-code --function-name $LAMBDA_FUNCTION_NAME --image-uri $IMAGE_URI
+      - echo "Waiting for Lambda function update to complete..."
+      - aws lambda wait function-updated --function-name $LAMBDA_FUNCTION_NAME
+      - echo "Verifying deployment..."
+      - aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME --query 'Configuration.CodeSha256' --output text
+      - echo "=========================================="
+      - echo "DEV Deployment completed successfully!"
+      - echo "Completed at: $(date)"
+      - echo "=========================================="
+
