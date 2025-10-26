@@ -387,12 +387,16 @@ Extract and return the following information in JSON format:
 1. invoice_number: The invoice number/identifier
 2. customer_name: The customer/buyer name (the "Bill To" or recipient)
 3. vendor_name: The vendor/seller name (the "From" or issuer)
-4. invoice_date: Invoice date in YYYY-MM-DD format
-5. due_date: Payment due date in YYYY-MM-DD format (if available)
-6. total_amount: Total invoice amount as a number
-7. currency: Currency code (USD, EUR, etc.)
-8. description: Brief description or summary of the invoice
-9. line_items: Array of items with:
+4. vendor_address: The vendor/seller address (the "From" or issuer address)
+5. vendor_phone: The vendor/seller phone number (the "From" or issuer phone number)
+6. vendor_email: The vendor/seller email address (the "From" or issuer email address)
+7. invoice_date: Invoice date in YYYY-MM-DD format
+8. due_date: Payment due date in YYYY-MM-DD format (if available)
+9. total_amount: Total invoice amount as a number
+10. currency: Currency code (USD, EUR, etc.)
+11. total_tax: Total tax amount as a number
+12. description: Brief description or summary of the invoice
+13. line_items: Array of items with:
    - item_name: Name/description of the item/service
    - quantity: Quantity ordered
    - unit_price: Price per unit (null if not available)
@@ -409,10 +413,14 @@ Respond ONLY with valid JSON in this exact format:
     "invoice_number": "string or null",
     "customer_name": "string or null",
     "vendor_name": "string or null",
+    "vendor_address": "string or null",
+    "vendor_phone": "string or null",
+    "vendor_email": "string or null",
     "invoice_date": "YYYY-MM-DD or null",
     "due_date": "YYYY-MM-DD or null",
     "total_amount": number or null,
     "currency": "string or null",
+    "total_tax": number or null,
     "description": "string or null",
     "line_items": [
         {
@@ -468,10 +476,14 @@ Respond ONLY with valid JSON in this exact format:
                 "invoice_number": None,
                 "customer_name": None,
                 "vendor_name": None,
+                "vendor_address": None,
+                "vendor_phone": None,
+                "vendor_email": None,
                 "invoice_date": None,
                 "due_date": None,
                 "total_amount": None,
                 "currency": None,
+                "total_tax": None,
                 "description": None,
                 "line_items": [],
                 "extraction_error": str(e)
@@ -527,8 +539,8 @@ Respond ONLY with valid JSON in this exact format:
             merged["line_items"].extend(new_data["line_items"])
         
         # Update other fields only if existing field is null/None/empty and new has value
-        for field in ["customer_name", "vendor_name", "invoice_date", "due_date", 
-                      "total_amount", "currency", "description", "invoice_number"]:
+        for field in ["customer_name", "vendor_name", "vendor_address", "vendor_phone", "vendor_email", "invoice_date", "due_date", 
+                      "total_amount", "currency", "total_tax", "description", "invoice_number"]:
             existing_value = merged.get(field)
             new_value = new_data.get(field)
             
