@@ -8,13 +8,13 @@ phases:
   pre_build:
     commands:
       - echo "=========================================="
-      - echo "Starting PRODUCTION Deployment"
-      - echo "Environment: PRODUCTION"
-      - echo "Lambda Function: $LAMBDA_FUNCTION_NAME"
-      - echo "AWS Account ID: $AWS_ACCOUNT_ID"
-      - echo "AWS Region: $AWS_DEFAULT_REGION"
-      - echo "ECR Repository: $ECR_REPOSITORY"
-      - echo "Image Tag: $IMAGE_TAG"
+      - echo "Starting $ENV Deployment"
+      - echo "Environment:$ENV"
+      - echo "Lambda Function:$LAMBDA_FUNCTION_NAME"
+      - echo "AWS Account ID:$AWS_ACCOUNT_ID"
+      - echo "AWS Region:$AWS_DEFAULT_REGION"
+      - echo "ECR Repository:$ECR_REPOSITORY"
+      - echo "Image Tag:$IMAGE_TAG"
       - echo "=========================================="
       - echo "Retrieving image URI from buildspec artifact..."
       - |
@@ -34,10 +34,10 @@ phases:
 
   build:
     commands:
-      - echo "WARNING: Deploying to PRODUCTION Lambda function!"
-      - echo "Function Name: $LAMBDA_FUNCTION_NAME"
-      - echo "Image URI: $IMAGE_URI"
-      - echo "This deployment affects PRODUCTION. Proceeding in 5 seconds..."
+      - echo "WARNING: Deploying to $ENV Lambda function!"
+      - echo "Function Name:$LAMBDA_FUNCTION_NAME"
+      - echo "Image URI:$IMAGE_URI"
+      - echo "This deployment affects $ENV. Proceeding in 5 seconds..."
       - sleep 5
       - echo "Updating Lambda function with new container image..."
       - aws lambda update-function-code --function-name $LAMBDA_FUNCTION_NAME --image-uri $IMAGE_URI
@@ -46,7 +46,7 @@ phases:
       - echo "Verifying deployment..."
       - aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME --query 'Configuration.CodeSha256' --output text
       - echo "=========================================="
-      - echo "PRODUCTION Deployment completed successfully!"
-      - echo "Completed at: $(date)"
+      - echo "$ENV Deployment completed successfully!"
+      - echo "Completed at:$(date)"
       - echo "=========================================="
 
