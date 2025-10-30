@@ -1,7 +1,8 @@
 # Define custom function directory
 ARG FUNCTION_DIR="/function"
 
-FROM python:3.13-slim AS base
+FROM public.ecr.aws/docker/library/python:3.13-slim AS base
+# FROM python:3.13-slim AS base
 FROM base AS builder
 
 # Include global arg in this stage of the build
