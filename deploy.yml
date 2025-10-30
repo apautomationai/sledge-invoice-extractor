@@ -1,8 +1,7 @@
 version: 0.2
 
-# AWS CodeBuild buildspec for PRODUCTION environment deployment
-# This file is used by CodeBuild to deploy the container image to PROD Lambda function
-# IMPORTANT: This deployment must be manually approved/triggered by system administrator
+# AWS CodeBuild buildspec for DEV environment deployment
+# This file is used by CodeBuild to deploy the container image to DEV Lambda function
 
 phases:
   pre_build:
@@ -34,11 +33,9 @@ phases:
 
   build:
     commands:
-      - echo "WARNING: Deploying to $ENV Lambda function!"
+      - echo "Deploying to $ENV Lambda function..."
       - echo "Function Name:$LAMBDA_FUNCTION_NAME"
       - echo "Image URI:$IMAGE_URI"
-      - echo "This deployment affects $ENV. Proceeding in 5 seconds..."
-      - sleep 5
       - echo "Updating Lambda function with new container image..."
       - aws lambda update-function-code --function-name $LAMBDA_FUNCTION_NAME --image-uri $IMAGE_URI
       - echo "Waiting for Lambda function update to complete..."
