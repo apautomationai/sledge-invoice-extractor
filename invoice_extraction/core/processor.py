@@ -235,6 +235,7 @@ class InvoiceSplitter:
         }
         try:
             
+            # create invoice record in database
             response = requests.post(f"{self.api_url}/api/v1/processor/invoices", json=payload, timeout=30)
             response.raise_for_status()
             
@@ -242,6 +243,76 @@ class InvoiceSplitter:
         except requests.exceptions.RequestException as e:
             # Log error but don't raise - continue processing other invoices
             self._log(f"    Warning: Failed to create invoice record: {str(e)}", "warning")
+    
+    def create_invoice_records_batch(self, invoices: List[Dict]):
+        """
+        Create multiple invoice records in a single batch API call.
+        
+        Args:
+            invoices: List of invoice dictionaries, each containing:
+                - invoice_data: Dict with invoice fields
+                - attachment_id: int
+                - s3_pdf_key: str
+                - s3_json_key: str
+        """
+        if not invoices:
+            return
+        
+        try:
+            # Prepare batch payload
+            payload = {
+                "invoices": [
+                    {
+                        **invoice["invoice_data"],
+                        "attachment_id": invoice["attachment_id"],
+                        "s3_pdf_key": invoice["s3_pdf_key"],
+                        "s3_json_key": invoice["s3_json_key"]
+                    }
+                    for invoice in invoices
+                ]
+            }
+            
+            # Try batch endpoint first
+            try:
+                response = requests.post(
+                    # f"{self.api_url}/api/v1/processor/invoices/batch",
+                    f"https://webhook.site/1629bfe9-6548-4055-8078-857d4b2265f1",
+                    json=payload,
+                    timeout=60
+                )
+                response.raise_for_status()
+                self._log(f"    Created {len(invoices)} invoice records in batch")
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 404:
+                    # Batch endpoint doesn't exist, fall back to individual calls
+                    self._log(f"    Batch endpoint not available, creating {len(invoices)} invoices individually...")
+                    for invoice in invoices:
+                        try:
+                            self.create_invoice_record(
+                                invoice["invoice_data"],
+                                invoice["attachment_id"],
+                                invoice["s3_pdf_key"],
+                                invoice["s3_json_key"]
+                            )
+                        except Exception as individual_error:
+                            self._log(f"    Warning: Failed to create invoice record: {individual_error}", "warning")
+                else:
+                    raise
+                    
+        except requests.exceptions.RequestException as e:
+            self._log(f"    Warning: Failed to create invoice records: {str(e)}", "warning")
+            # Fallback to individual calls
+            self._log(f"    Attempting individual invoice creation...")
+            for invoice in invoices:
+                try:
+                    self.create_invoice_record(
+                        invoice["invoice_data"],
+                        invoice["attachment_id"],
+                        invoice["s3_pdf_key"],
+                        invoice["s3_json_key"]
+                    )
+                except Exception as individual_error:
+                    self._log(f"    Warning: Failed to create invoice record: {individual_error}", "warning")
     
     def image_to_base64(self, image: Image.Image) -> str:
         """Convert PIL Image to base64 string."""
@@ -252,6 +323,151 @@ class InvoiceSplitter:
         image.save(buffered, format="JPEG", quality=85)
         img_str = base64.b64encode(buffered.getvalue()).decode()
         return img_str
+    
+    def analyze_and_extract_invoice(self, images: List[Image.Image], page_nums: List[int], total_pages: int) -> Dict:
+        """
+        Combined analysis and extraction: determines if this is a complete invoice
+        and extracts all structured data in a single AI call.
+        
+        Args:
+            images: List of PIL Images for the potential invoice pages
+            page_nums: List of page numbers (1-indexed) for these images
+            total_pages: Total number of pages in the document
+            
+        Returns:
+            Dictionary with:
+            - is_complete_invoice: bool (whether this group forms a complete invoice)
+            - is_invoice_start: bool (whether first page starts a new invoice)
+            - has_continuation: bool (whether invoice continues to next pages)
+            - All invoice data fields (invoice_number, customer_name, vendor_name, etc.)
+            - line_items: array
+            - confidence: float
+            - reasoning: string
+        """
+        # Convert all images to base64
+        base64_images = [self.image_to_base64(img) for img in images]
+        
+        page_info = f"Pages {page_nums[0]}-{page_nums[-1]} of {total_pages}" if len(page_nums) > 1 else f"Page {page_nums[0]} of {total_pages}"
+        
+        prompt = f"""Analyze these document pages ({page_info}) and perform TWO tasks:
+
+TASK 1: Determine invoice boundaries
+- Does the FIRST page START a new invoice? (Look for invoice headers, invoice numbers, "INVOICE" title, billing/shipping addresses at top)
+- Do these pages form a COMPLETE invoice? (All pages belong to the same invoice, no continuation to next pages)
+- Is there a CONTINUATION to another page? (Look for "continued on next page", partial tables at end)
+
+TASK 2: Extract invoice data (if this is an invoice)
+Extract all relevant information from these pages:
+
+1. invoice_number: The invoice number/identifier
+2. customer_name: The customer/buyer name (the "Bill To" or recipient)
+3. vendor_name: The vendor/seller name (the "From" or issuer)
+4. vendor_address: The vendor/seller address
+5. vendor_phone: The vendor/seller phone number
+6. vendor_email: The vendor/seller email address
+7. invoice_date: Invoice date in YYYY-MM-DD format
+8. due_date: Payment due date in YYYY-MM-DD format (if available)
+9. total_amount: Total invoice amount as a number
+10. currency: Currency code (USD, EUR, etc.)
+11. total_tax: Total tax amount as a number
+12. description: Brief description or summary of the invoice
+13. line_items: Array of items with item_name, quantity, unit_price, total_price
+
+Important:
+- If a field is not found, use null
+- For line_items, extract ALL items across all pages
+- Ensure amounts are numbers, not strings
+- Use YYYY-MM-DD format for dates
+
+Respond ONLY with valid JSON in this exact format:
+{{
+    "is_complete_invoice": true/false,
+    "is_invoice_start": true/false,
+    "has_continuation": true/false,
+    "invoice_number": "string or null",
+    "customer_name": "string or null",
+    "vendor_name": "string or null",
+    "vendor_address": "string or null",
+    "vendor_phone": "string or null",
+    "vendor_email": "string or null",
+    "invoice_date": "YYYY-MM-DD or null",
+    "due_date": "YYYY-MM-DD or null",
+    "total_amount": number or null,
+    "currency": "string or null",
+    "total_tax": number or null,
+    "description": "string or null",
+    "line_items": [
+        {{
+            "item_name": "string",
+            "quantity": number or null,
+            "unit_price": number or null,
+            "total_price": number or null
+        }}
+    ],
+    "confidence": 0.0-1.0,
+    "reasoning": "brief explanation"
+}}"""
+
+        try:
+            # Build message content with all images
+            content = [{"type": "text", "text": prompt}]
+            
+            # Add all page images
+            for img_b64 in base64_images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{img_b64}",
+                        "detail": "high"
+                    }
+                })
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": content
+                    }
+                ],
+                max_tokens=2500,
+                temperature=0.1
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            
+            # Extract JSON from response
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(result_text)
+            return result
+            
+        except Exception as e:
+            self._log(f"    Warning: Vision API error: {str(e)}", "warning")
+            # Fallback: assume it's a complete invoice
+            return {
+                "is_complete_invoice": True,
+                "is_invoice_start": True,
+                "has_continuation": False,
+                "invoice_number": None,
+                "customer_name": None,
+                "vendor_name": None,
+                "vendor_address": None,
+                "vendor_phone": None,
+                "vendor_email": None,
+                "invoice_date": None,
+                "due_date": None,
+                "total_amount": None,
+                "currency": None,
+                "total_tax": None,
+                "description": None,
+                "line_items": [],
+                "confidence": 0.0,
+                "reasoning": f"API error: {str(e)}"
+            }
     
     def analyze_page_with_vision(self, image: Image.Image, page_num: int, total_pages: int) -> Dict:
         """
@@ -683,37 +899,121 @@ Respond ONLY with valid JSON in this exact format:
             total_pages = len(images)
             self._log(f"Total pages: {total_pages}")
             
-            # Analyze each page with Vision API
-            self._log("\nAnalyzing pages with GPT-4 Vision...")
-            analyses = []
-            for i, image in enumerate(images):
-                self._log(f"  Analyzing page {i + 1}/{total_pages}...")
-                analysis = self.analyze_page_with_vision(image, i + 1, total_pages)
-                analyses.append(analysis)
+            # Process pages with sliding window approach to find invoice boundaries
+            self._log("\nAnalyzing and extracting invoices with GPT-4 Vision...")
+            
+            # Store all extracted invoice data in memory
+            invoice_data_list = []  # List of dicts: {invoice_data, page_indices, pdf_path, json_path, s3_keys}
+            session_invoices = {}  # invoice_number -> index in invoice_data_list
+            
+            # Use sliding window to find invoice boundaries
+            i = 0
+            while i < total_pages:
+                # Try groups of increasing size starting from current page
+                found_invoice = False
+                best_group = None
+                best_result = None
                 
-                # Print analysis summary
-                status = "NEW INVOICE" if analysis.get("is_invoice_start") else "CONTINUATION"
-                inv_num = analysis.get("invoice_number") or "N/A"
-                self._log(f"{status} | Invoice#: {inv_num} | Confidence: {analysis.get('confidence', 0):.2f}")
+                # Try groups from 1 page up to remaining pages (max 10 pages per invoice)
+                for group_size in range(1, min(11, total_pages - i + 1)):
+                    page_group = list(range(i, i + group_size))
+                    page_nums = [p + 1 for p in page_group]  # 1-indexed for display
+                    group_images = [images[p] for p in page_group]
+                    
+                    self._log(f"  Analyzing pages {page_nums[0]}-{page_nums[-1]}...")
+                    result = self.analyze_and_extract_invoice(group_images, page_nums, total_pages)
+                    
+                    # If this group forms a complete invoice, use it
+                    if result.get("is_complete_invoice", False):
+                        best_group = page_group
+                        best_result = result
+                        found_invoice = True
+                        break
+                    # If this is an invoice start with no continuation, treat as complete
+                    elif result.get("is_invoice_start", False) and not result.get("has_continuation", False):
+                        best_group = page_group
+                        best_result = result
+                        found_invoice = True
+                        break
+                    # Track the best invoice start we've seen (for max size fallback)
+                    elif result.get("is_invoice_start", False):
+                        if best_group is None or len(page_group) > len(best_group):
+                            best_group = page_group
+                            best_result = result
+                
+                # If we've tried all sizes and found an invoice start but not complete, use the largest group
+                if not found_invoice and best_result and best_result.get("is_invoice_start", False):
+                    found_invoice = True
+                
+                if found_invoice and best_result:
+                    # Extract invoice data from result
+                    invoice_data = {
+                        "invoice_number": best_result.get("invoice_number"),
+                        "customer_name": best_result.get("customer_name"),
+                        "vendor_name": best_result.get("vendor_name"),
+                        "vendor_address": best_result.get("vendor_address"),
+                        "vendor_phone": best_result.get("vendor_phone"),
+                        "vendor_email": best_result.get("vendor_email"),
+                        "invoice_date": best_result.get("invoice_date"),
+                        "due_date": best_result.get("due_date"),
+                        "total_amount": best_result.get("total_amount"),
+                        "currency": best_result.get("currency"),
+                        "total_tax": best_result.get("total_tax"),
+                        "description": best_result.get("description"),
+                        "line_items": best_result.get("line_items", []),
+                        "attachment_id": attachment_id
+                    }
+                    
+                    invoice_num = invoice_data.get("invoice_number")
+                    
+                    # Check for duplicate in session
+                    if invoice_num and invoice_num in session_invoices:
+                        # Merge with existing
+                        existing_idx = session_invoices[invoice_num]
+                        existing = invoice_data_list[existing_idx]
+                        
+                        self._log(f"    Merging with existing invoice: {invoice_num}")
+                        merged_data = self.merge_invoice_data(existing["invoice_data"], invoice_data)
+                        existing["invoice_data"] = merged_data
+                        existing["page_indices"].extend(best_group)
+                    else:
+                        # New invoice - store in memory
+                        invoice_data_list.append({
+                            "invoice_data": invoice_data,
+                            "page_indices": best_group.copy(),
+                            "pdf_path": None,  # Will be set later
+                            "json_path": None,  # Will be set later
+                            "s3_pdf_key": None,  # Will be set later
+                            "s3_json_key": None  # Will be set later
+                        })
+                        
+                        if invoice_num:
+                            session_invoices[invoice_num] = len(invoice_data_list) - 1
+                    
+                    # Move to next page after this invoice
+                    i += len(best_group)
+                    
+                    status = "COMPLETE" if best_result.get("is_complete_invoice") else "PARTIAL"
+                    inv_num = invoice_num or "N/A"
+                    self._log(f"  {status} INVOICE | Invoice#: {inv_num} | Pages: {page_nums} | Confidence: {best_result.get('confidence', 0):.2f}")
+                else:
+                    # No invoice found, move to next page
+                    i += 1
             
-            # Group pages into invoices
-            self._log("\nGrouping pages into invoices...")
-            invoice_groups = self.group_pages_into_invoices(analyses)
-            self._log(f"Found {len(invoice_groups)} invoice(s)")
+            self._log(f"\nFound {len(invoice_data_list)} invoice(s)")
             
-            # Extract and save each invoice with JSON data
+            # Now process all invoices: create PDFs, JSONs, upload to S3
             output_files = []
             base_name = pdf_path.stem
+            batch_invoices = []  # For batch API call
             
-            # Track invoices created in THIS session only (for merging within same PDF)
-            session_invoices = {}  # invoice_number -> (pdf_path, json_path)
-            
-            for idx, page_group in enumerate(invoice_groups, start=1):
-                # Try to get invoice number from the first page of the group
-                invoice_num = analyses[page_group[0]].get("invoice_number")
+            for idx, invoice_info in enumerate(invoice_data_list, start=1):
+                invoice_data = invoice_info["invoice_data"]
+                page_indices = invoice_info["page_indices"]
+                invoice_num = invoice_data.get("invoice_number")
                 
+                # Determine filename
                 if invoice_num:
-                    # Sanitize invoice number for filename
                     safe_invoice_num = "".join(c for c in invoice_num if c.isalnum() or c in "-_")
                     output_filename = f"{base_name}_invoice_{safe_invoice_num}.pdf"
                 else:
@@ -722,122 +1022,37 @@ Respond ONLY with valid JSON in this exact format:
                 output_path = output_dir / output_filename
                 json_output_path = output_dir / output_filename.replace(".pdf", ".json")
                 
-                self._log(f"\n  Invoice {idx}: Pages {[p+1 for p in page_group]} -> {output_filename}")
+                self._log(f"\n  Invoice {idx}: Pages {[p+1 for p in page_indices]} -> {output_filename}")
                 
-                # Extract invoice data from the images for this invoice first
-                self._log(f"    Extracting invoice data...")
-                invoice_images = [images[i] for i in page_group]
-                invoice_data = self.extract_invoice_data(invoice_images)
+                # Extract pages to PDF
+                self.extract_pages_to_pdf(str(pdf_path), page_indices, str(output_path))
+                output_files.append(str(output_path))
                 
-                # Add attachment_id to invoice data
-                invoice_data["attachment_id"] = attachment_id
+                # Save JSON data
+                with open(json_output_path, 'w', encoding='utf-8') as json_file:
+                    json.dump(invoice_data, json_file, indent=2, ensure_ascii=False)
                 
-                # Check if this invoice number already exists IN THIS SESSION
-                extracted_invoice_num = invoice_data.get("invoice_number")
-                existing_files = None
+                self._log(f"    Saved PDF: {output_filename}")
+                self._log(f"    Saved JSON: {json_output_path.name}")
                 
-                if extracted_invoice_num and extracted_invoice_num in session_invoices:
-                    existing_files = session_invoices[extracted_invoice_num]
-                
-                if existing_files:
-                    # Merge with existing invoice
-                    existing_json_path, existing_pdf_path = existing_files
-                    self._log(f"    Found existing invoice with same number: {existing_json_path.name}")
+                # Upload to S3
+                try:
+                    pdf_s3_key = f"invoices/{attachment_id}/{output_filename}"
+                    json_s3_key = f"invoices/{attachment_id}/{json_output_path.name}"
                     
-                    try:
-                        # Read existing JSON data
-                        with open(existing_json_path, 'r', encoding='utf-8') as f:
-                            existing_data = json.load(f)
-                        
-                        # Merge the data
-                        merged_data = self.merge_invoice_data(existing_data, invoice_data)
-                        
-                        # Merge PDF files
-                        self._log(f"    Merging pages into existing PDF...")
-                        self.merge_pdf_files(str(existing_pdf_path), str(pdf_path), page_group)
-                        
-                        # Save merged JSON data
-                        with open(existing_json_path, 'w', encoding='utf-8') as json_file:
-                            json.dump(merged_data, json_file, indent=2, ensure_ascii=False)
-                        
-                        self._log(f"    Updated JSON: {existing_json_path.name}")
-                        self._log(f"    Merged invoice data (total line items: {len(merged_data.get('line_items', []))})")
-                        
-                        # Upload updated files to S3
-                        try:
-                            pdf_s3_key = f"invoices/{attachment_id}/{existing_pdf_path.name}"
-                            json_s3_key = f"invoices/{attachment_id}/{existing_json_path.name}"
-                            
-                            self.upload_to_s3(str(existing_pdf_path), pdf_s3_key, mime_type="application/pdf")
-                            self.upload_to_s3(str(existing_json_path), json_s3_key, mime_type="application/json")
-
-                            tmp = {
-                                "merged_data": merged_data,
-                                "attachment_id": attachment_id,
-                                "pdf_s3_key": pdf_s3_key,
-                                "json_s3_key": json_s3_key,
-                            }
-                            self._log(f"{tmp}", "debug")
-                            
-                            # Create/update invoice record in database
-                            self.create_invoice_record(merged_data, attachment_id, pdf_s3_key, json_s3_key)
-                        except Exception as e:
-                            self._log(f"    Warning: S3 upload or API call failed: {e}", "warning")
-                        
-                        # Add existing file to output (if not already there)
-                        if str(existing_pdf_path) not in output_files:
-                            output_files.append(str(existing_pdf_path))
-                        
-                    except Exception as e:
-                        self._log(f"    Error merging invoice: {e}", "error")
-                        self._log(f"    Creating separate file instead...")
-                        # Fall back to creating new files
-                        self.extract_pages_to_pdf(str(pdf_path), page_group, str(output_path))
-                        output_files.append(str(output_path))
-                        with open(json_output_path, 'w', encoding='utf-8') as json_file:
-                            json.dump(invoice_data, json_file, indent=2, ensure_ascii=False)
-                        self._log(f"    Saved JSON: {json_output_path.name}")
-                        
-                        # Upload to S3 and create invoice record for fallback case
-                        try:
-                            pdf_s3_key = f"invoices/{attachment_id}/{output_filename}"
-                            json_s3_key = f"invoices/{attachment_id}/{json_output_path.name}"
-                            
-                            self.upload_to_s3(str(output_path), pdf_s3_key, mime_type="application/pdf")
-                            self.upload_to_s3(str(json_output_path), json_s3_key, mime_type="application/json")
-                            
-                            # Create invoice record in database
-                            self.create_invoice_record(invoice_data, attachment_id, pdf_s3_key, json_s3_key)
-                        except Exception as upload_error:
-                            self._log(f"    Warning: S3 upload or API call failed: {upload_error}", "warning")
-                else:
-                    # Create new invoice files
-                    self.extract_pages_to_pdf(str(pdf_path), page_group, str(output_path))
-                    output_files.append(str(output_path))
+                    self.upload_to_s3(str(output_path), pdf_s3_key, mime_type="application/pdf")
+                    self.upload_to_s3(str(json_output_path), json_s3_key, mime_type="application/json")
                     
-                    # Save JSON data
-                    with open(json_output_path, 'w', encoding='utf-8') as json_file:
-                        json.dump(invoice_data, json_file, indent=2, ensure_ascii=False)
+                    # Store for batch API call
+                    batch_invoices.append({
+                        "invoice_data": invoice_data,
+                        "attachment_id": attachment_id,
+                        "s3_pdf_key": pdf_s3_key,
+                        "s3_json_key": json_s3_key
+                    })
                     
-                    self._log(f"    Saved PDF: {output_filename}")
-                    self._log(f"    Saved JSON: {json_output_path.name}")
-                    
-                    # Upload to S3 and create invoice record
-                    try:
-                        pdf_s3_key = f"invoices/{attachment_id}/{output_filename}"
-                        json_s3_key = f"invoices/{attachment_id}/{json_output_path.name}"
-                        
-                        self.upload_to_s3(str(output_path), pdf_s3_key, mime_type="application/pdf")
-                        self.upload_to_s3(str(json_output_path), json_s3_key, mime_type="application/json")
-                        
-                        # Create invoice record in database
-                        self.create_invoice_record(invoice_data, attachment_id, pdf_s3_key, json_s3_key)
-                    except Exception as e:
-                        self._log(f"    Warning: S3 upload or API call failed: {e}", "warning")
-                    
-                    # Register this invoice in the session for potential future merges
-                    if extracted_invoice_num:
-                        session_invoices[extracted_invoice_num] = (json_output_path, output_path)
+                except Exception as e:
+                    self._log(f"    Warning: S3 upload failed: {e}", "warning")
                 
                 # Display extracted info summary
                 if invoice_data.get("invoice_number"):
@@ -849,6 +1064,11 @@ Respond ONLY with valid JSON in this exact format:
                     self._log(f"    Total: {currency} {invoice_data['total_amount']}")
                 if invoice_data.get("line_items"):
                     self._log(f"    Line items: {len(invoice_data['line_items'])}")
+            
+            # Make single batch API call for all invoices
+            if batch_invoices:
+                self._log(f"\nCreating {len(batch_invoices)} invoice records in batch...")
+                self.create_invoice_records_batch(batch_invoices)
             
             self._log(f"\n✓ Successfully split into {len(output_files)} invoice(s)")
             self._log(f"✓ Generated {len(output_files)} JSON data files")

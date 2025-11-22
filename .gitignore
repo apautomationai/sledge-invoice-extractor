@@ -12,5 +12,6 @@ wheels/
 
 # Application specific
 output/*
+test_output/*
 /data/*
 logs
